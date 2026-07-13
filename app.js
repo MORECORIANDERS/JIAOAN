@@ -76,6 +76,80 @@
     }
   }
 
+  // ---------- IndexedDB（存教材正文，容量大） ----------
+  const IDB_NAME = "jiaoan_db";
+  const IDB_STORE = "textbook_content";
+  const idbDbP = (() => {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(IDB_NAME, 1);
+      req.onupgradeneeded = (e) => {
+        const db = e.target.result;
+        if (!db.objectStoreNames.contains(IDB_STORE)) {
+          db.createObjectStore(IDB_STORE, { keyPath: "textbook_id" });
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  })();
+
+  async function idbPutContent(textbookId, contentMap) {
+    const db = await idbDbP;
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, "readwrite");
+      tx.objectStore(IDB_STORE).put({ textbook_id: textbookId, content: contentMap });
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = () => reject(tx.error);
+    });
+  }
+
+  async function idbGetContent(textbookId) {
+    const db = await idbDbP;
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, "readonly");
+      const req = tx.objectStore(IDB_STORE).get(textbookId);
+      req.onsuccess = () => resolve(req.result ? req.result.content : null);
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  async function idbDeleteContent(textbookId) {
+    const db = await idbDbP;
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, "readwrite");
+      tx.objectStore(IDB_STORE).delete(textbookId);
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = () => reject(tx.error);
+    });
+  }
+
+  async function idbClearAll() {
+    const db = await idbDbP;
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, "readwrite");
+      tx.objectStore(IDB_STORE).clear();
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = () => reject(tx.error);
+    });
+  }
+
+  // ---------- pdf.js 初始化 ----------
+  function initPdfJs() {
+    if (window.pdfjsLib) {
+      pdfjsLib.GlobalWorkerOptions.workerSrc =
+        "https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js";
+    }
+  }
+
+  // ---------- PDF 导入向导状态 ----------
+  const importState = {
+    mode: "link", // link | new
+    pdfPagesCache: {}, // {1:"页1文本",...}
+    pdfPageCount: 0,
+    pendingTextbook: null, // 解析出的教材对象（步骤2用）
+    pendingContentMap: null, // 步骤3确认时组装
+  };
+
   // ---------- 配置 ----------
   function getConfig() {
     return lsGet(SK.CONFIG, null);
@@ -97,15 +171,22 @@
   // ---------- 教材 ----------
   function getAllTextbooks() {
     const custom = lsGet(SK.TEXTBOOKS, []);
-    return (window.PRESET_TEXTBOOKS || []).concat(custom);
+    const realCustom = custom.filter((t) => !t._override);
+    const overrides = custom.filter((t) => t._override);
+    // 预置教材 + 覆盖标记（has_content）
+    const presets = (window.PRESET_TEXTBOOKS || []).map((t) => {
+      const ov = overrides.find((o) => o.id === t.id);
+      return ov ? Object.assign({}, t, { has_content: ov.has_content }) : t;
+    });
+    return presets.concat(realCustom);
   }
 
   function getCustomTextbooks() {
-    return lsGet(SK.TEXTBOOKS, []);
+    return lsGet(SK.TEXTBOOKS, []).filter((t) => !t._override);
   }
 
   function addCustomTextbook(data) {
-    const list = getCustomTextbooks();
+    const list = lsGet(SK.TEXTBOOKS, []);
     list.push(data);
     lsSet(SK.TEXTBOOKS, list);
   }
@@ -170,17 +251,28 @@
     );
   }
 
-  function buildUserPrompt(params, textbook, chapter, lessonTitle) {
+  function buildUserPrompt(params, textbook, chapter, lessonTitle, lessonContent) {
     const lines = [
       `教材：${textbook.title}（${textbook.subject} · ${textbook.grade} · ${textbook.version}）`,
     ];
     if (chapter) lines.push(`章节：${chapter.title}`);
     lines.push(`课时：${lessonTitle}`);
     lines.push(`课时时长：${params.duration_minutes} 分钟`);
+    if (lessonContent) {
+      const trimmed =
+        lessonContent.length > 15000
+          ? lessonContent.slice(0, 15000) + "\n…（原文过长已截断）"
+          : lessonContent;
+      lines.push(`\n【该课时教材原文】\n${trimmed}\n`);
+    }
     if (params.student_level) lines.push(`班级学情：${params.student_level}`);
     if (params.extra_objectives) lines.push(`补充教学目标/要求：${params.extra_objectives}`);
     if (params.style) lines.push(`教学风格倾向：${params.style}`);
-    lines.push("\n请根据以上信息生成完整教案。");
+    lines.push(
+      lessonContent
+        ? "\n请严格基于上述教材原文生成完整教案，知识点、例题、定义应与原文一致，不得编造原文未涉及的内容。"
+        : "\n请根据以上信息生成完整教案。"
+    );
     return lines.join("\n");
   }
 
@@ -336,6 +428,7 @@
             ${t.version ? `<span>· ${escapeHtml(t.version)}</span>` : ""}
           </div>
           ${isCustom ? `<div class="tc-badge">自定义</div>` : ""}
+          ${t.has_content ? `<div class="tc-content-badge">📄 含教材原文</div>` : ""}
         </div>`;
       })
       .join("");
@@ -445,6 +538,283 @@
     loadTextbooks();
   }
 
+  // ---------- PDF 导入向导 ----------
+  function openImportPdfModal() {
+    closeAddTextbookModal();
+    // 填充关联教材下拉
+    const sel = $("#ipLinkTextbook");
+    sel.innerHTML = state.textbooks
+      .map((t) => `<option value="${escapeHtml(t.id)}">${escapeHtml(t.title)}</option>`)
+      .join("");
+    // 重置状态
+    importState.mode = "link";
+    importState.pdfPagesCache = {};
+    importState.pdfPageCount = 0;
+    importState.pendingTextbook = null;
+    importState.pendingContentMap = null;
+    $("#ipPdfFile").value = "";
+    $("#ipPdfStatus").textContent = "";
+    document.querySelector('input[name="ipMode"][value="link"]').checked = true;
+    $("#ipLinkRow").classList.remove("hidden");
+    $("#ipNewFields").classList.add("hidden");
+    gotoImportStep(1);
+    $("#modalImportPdf").classList.remove("hidden");
+  }
+
+  function closeImportPdfModal() {
+    $("#modalImportPdf").classList.add("hidden");
+    $("#ipPagePreview").classList.add("hidden");
+  }
+
+  function gotoImportStep(n) {
+    [1, 2, 3].forEach((i) => {
+      $(`#importStep${i}`).classList.toggle("hidden", i !== n);
+    });
+    $$(".iwp-step").forEach((el) => {
+      el.classList.toggle("active", parseInt(el.dataset.step, 10) === n);
+    });
+  }
+
+  // 切换关联方式
+  function onImportModeChange() {
+    const mode = document.querySelector('input[name="ipMode"]:checked').value;
+    importState.mode = mode;
+    $("#ipLinkRow").classList.toggle("hidden", mode !== "link");
+    $("#ipNewFields").classList.toggle("hidden", mode !== "new");
+  }
+
+  // 解析 PDF 文本
+  async function handlePdfUpload(file) {
+    if (!file) return;
+    if (!window.pdfjsLib) {
+      $("#ipPdfStatus").textContent = "❌ PDF 解析库未加载，请检查网络后刷新页面。";
+      return;
+    }
+    $("#ipPdfStatus").textContent = "正在解析 PDF…";
+    try {
+      const buf = await file.arrayBuffer();
+      const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+      importState.pdfPageCount = pdf.numPages;
+      const cache = {};
+      for (let i = 1; i <= pdf.numPages; i++) {
+        const page = await pdf.getPage(i);
+        const tc = await page.getTextContent();
+        cache[i] = tc.items.map((it) => it.str).join("");
+      }
+      importState.pdfPagesCache = cache;
+      const totalChars = Object.values(cache).reduce((s, t) => s + t.length, 0);
+      if (totalChars < 50) {
+        $("#ipPdfStatus").textContent =
+          `⚠ 共 ${pdf.numPages} 页，但提取到的文本极少。该 PDF 可能是扫描版（图片），暂不支持 OCR。`;
+      } else {
+        $("#ipPdfStatus").textContent = `✓ 已解析 ${pdf.numPages} 页，共约 ${totalChars} 字。`;
+      }
+    } catch (e) {
+      $("#ipPdfStatus").textContent = "❌ 解析失败：" + (e?.message || e);
+      console.error("[pdf parse]", e);
+    }
+  }
+
+  // 解析页码范围字符串，返回页码数组。支持 5 / 5-7 / 5,8,10
+  function parsePageRange(str, maxPage) {
+    const s = String(str || "").trim();
+    if (!s) return [];
+    const pages = [];
+    for (const part of s.split(",")) {
+      const p = part.trim();
+      if (!p) continue;
+      if (/^\d+$/.test(p)) {
+        const n = parseInt(p, 10);
+        if (n >= 1 && n <= maxPage) pages.push(n);
+      } else {
+        const m = p.match(/^(\d+)\s*-\s*(\d+)$/);
+        if (m) {
+          const a = parseInt(m[1], 10);
+          const b = parseInt(m[2], 10);
+          const lo = Math.min(a, b);
+          const hi = Math.max(a, b);
+          for (let i = lo; i <= hi; i++) {
+            if (i >= 1 && i <= maxPage) pages.push(i);
+          }
+        }
+      }
+    }
+    return pages;
+  }
+
+  // 步骤1 → 步骤2：构建待导入教材结构 + 渲染课时页码映射
+  function goImportStep2() {
+    if (importState.pdfPageCount === 0) {
+      toast("请先上传并成功解析 PDF", "error");
+      return;
+    }
+    let tb;
+    if (importState.mode === "link") {
+      const id = $("#ipLinkTextbook").value;
+      tb = state.textbooks.find((t) => t.id === id);
+      if (!tb) {
+        toast("请选择要关联的教材", "error");
+        return;
+      }
+      // 关联模式下，若该教材已有 content，提示将覆盖
+      tb = JSON.parse(JSON.stringify(tb)); // 深拷贝避免污染原数据
+    } else {
+      const subject = $("#ipSubject").value.trim();
+      const grade = $("#ipGrade").value.trim();
+      const title = $("#ipTitle").value.trim();
+      const version = $("#ipVersion").value.trim();
+      const chaptersText = $("#ipChapters").value.trim();
+      if (!subject || !grade || !title) {
+        toast("请填写学科、年级、教材名称", "error");
+        return;
+      }
+      const chapters = chaptersText
+        .split("\n")
+        .map((l) => l.trim())
+        .filter(Boolean)
+        .map((line, idx) => {
+          const [ct, ls] = line.split("|").map((s) => s.trim());
+          return {
+            id: `ch${idx + 1}`,
+            title: ct || "",
+            lessons: (ls || "").split(",").map((s) => s.trim()).filter(Boolean),
+          };
+        });
+      tb = {
+        id: uuid("custom"),
+        subject,
+        grade,
+        version,
+        title,
+        chapters,
+        custom: true,
+      };
+    }
+    if (!tb.chapters || tb.chapters.length === 0) {
+      toast("该教材没有章节结构，无法映射页码", "error");
+      return;
+    }
+    importState.pendingTextbook = tb;
+    renderLessonPageMap(tb);
+    gotoImportStep(2);
+  }
+
+  // 渲染课时页码映射列表
+  function renderLessonPageMap(tb) {
+    const wrap = $("#ipLessonPageMap");
+    const html = tb.chapters
+      .map((ch) => {
+        const lessonRows = (ch.lessons || [])
+          .map(
+            (ln) => `
+          <div class="lpm-row" data-ch="${escapeHtml(ch.id)}" data-lesson="${escapeHtml(ln)}">
+            <span class="lpm-name" title="${escapeHtml(ln)}">${escapeHtml(ln)}</span>
+            <input type="text" class="input lpm-pages" placeholder="如 5-7" />
+            <button type="button" class="btn btn-ghost lpm-preview-btn">预览</button>
+          </div>`
+          )
+          .join("");
+        return `
+        <div class="lpm-group-title">${escapeHtml(ch.title)}</div>
+        ${lessonRows || `<div class="empty-hint">该章节无课时</div>`}`;
+      })
+      .join("");
+    wrap.innerHTML = html;
+    // 预览按钮
+    wrap.querySelectorAll(".lpm-row").forEach((row) => {
+      const btn = row.querySelector(".lpm-preview-btn");
+      const input = row.querySelector(".lpm-pages");
+      btn.addEventListener("click", () => {
+        const pages = parsePageRange(input.value, importState.pdfPageCount);
+        if (pages.length === 0) {
+          toast("请先填写有效页码范围", "error");
+          return;
+        }
+        const text = pages
+          .map((p) => `--- 第 ${p} 页 ---\n${importState.pdfPagesCache[p] || ""}`)
+          .join("\n\n");
+        $("#ipPreviewBody").textContent = text;
+        $("#ipPagePreview").classList.remove("hidden");
+      });
+    });
+  }
+
+  // 步骤2 → 步骤3：组装 contentMap + 显示摘要
+  function goImportStep3() {
+    const tb = importState.pendingTextbook;
+    const contentMap = {};
+    let filled = 0;
+    let total = 0;
+    let totalChars = 0;
+    $("#ipLessonPageMap").querySelectorAll(".lpm-row").forEach((row) => {
+      const chId = row.dataset.ch;
+      const lesson = row.dataset.lesson;
+      const pagesStr = row.querySelector(".lpm-pages").value.trim();
+      total++;
+      const pages = parsePageRange(pagesStr, importState.pdfPageCount);
+      if (pages.length === 0) return;
+      const text = pages
+        .map((p) => importState.pdfPagesCache[p] || "")
+        .join("\n\n")
+        .trim();
+      if (text) {
+        contentMap[`${chId}|${lesson}`] = text;
+        filled++;
+        totalChars += text.length;
+      }
+    });
+    importState.pendingContentMap = contentMap;
+    $("#ipSummary").innerHTML = `
+      <div class="is-row"><span>教材</span><span class="is-val">${escapeHtml(tb.title)}</span></div>
+      <div class="is-row"><span>总课时数</span><span class="is-val">${total}</span></div>
+      <div class="is-row"><span>已提取正文课时</span><span class="is-val">${filled}</span></div>
+      <div class="is-row"><span>正文总字数</span><span class="is-val">约 ${totalChars} 字</span></div>
+      <div class="is-row"><span>PDF 页数</span><span class="is-val">${importState.pdfPageCount}</span></div>
+      ${filled === 0 ? `<div style="color:var(--danger);margin-top:8px">⚠ 没有任何课时填写页码，将不导入正文。请返回上一步填写。</div>` : ""}
+    `;
+    gotoImportStep(3);
+  }
+
+  // 确认导入：保存教材元信息 + 正文到 IndexedDB
+  async function confirmImport() {
+    const tb = importState.pendingTextbook;
+    const contentMap = importState.pendingContentMap || {};
+    const filled = Object.keys(contentMap).length;
+    if (filled === 0) {
+      toast("没有任何课时提取到正文，请返回填写页码", "error");
+      return;
+    }
+    tb.has_content = true;
+    // 保存教材元信息（关联模式：更新现有；新建模式：新增）
+    if (importState.mode === "new") {
+      addCustomTextbook(tb);
+    } else {
+      // 关联模式：更新该教材的 has_content 标记
+      const customs = lsGet(SK.TEXTBOOKS, []);
+      const idx = customs.findIndex((t) => t.id === tb.id);
+      if (idx >= 0) {
+        customs[idx].has_content = true;
+        lsSet(SK.TEXTBOOKS, customs);
+      } else {
+        // 关联的是预置教材——存一条覆盖记录到 customs，标记 has_content
+        // 但预置教材 id 固定，直接存 customs 会重复；改为存一个轻量覆盖项
+        const override = { id: tb.id, has_content: true, _override: true };
+        customs.push(override);
+        lsSet(SK.TEXTBOOKS, customs);
+      }
+    }
+    // 存正文到 IndexedDB
+    try {
+      await idbPutContent(tb.id, contentMap);
+    } catch (e) {
+      toast("正文存储失败：" + (e?.message || e), "error");
+      return;
+    }
+    toast(`导入成功！${filled} 个课时已提取教材正文`, "success");
+    closeImportPdfModal();
+    loadTextbooks();
+  }
+
   // ---------- 生成教案 ----------
   async function submitGenerate(e) {
     e.preventDefault();
@@ -471,8 +841,29 @@
     $("#lessonPreview").classList.add("hidden");
     $("#lessonEditor").classList.add("hidden");
     try {
+      // 取该课时教材正文（如有）
+      let lessonContent = "";
+      if (state.selectedTextbook.has_content) {
+        try {
+          const contentMap = await idbGetContent(state.selectedTextbook.id);
+          if (contentMap) {
+            const key = state.selectedChapter
+              ? `${state.selectedChapter.id}|${params.lesson_title}`
+              : params.lesson_title;
+            lessonContent = contentMap[key] || "";
+          }
+        } catch (e) {
+          console.warn("[load lesson content]", e);
+        }
+      }
       const sys = buildSystemPrompt();
-      const user = buildUserPrompt(params, state.selectedTextbook, state.selectedChapter, params.lesson_title);
+      const user = buildUserPrompt(
+        params,
+        state.selectedTextbook,
+        state.selectedChapter,
+        params.lesson_title,
+        lessonContent
+      );
       const content = await callLLM(sys, user);
       const now = Date.now();
       const record = {
@@ -741,12 +1132,29 @@
   }
 
   // ---------- 数据导入导出 ----------
-  function exportAllData() {
+  async function exportAllData() {
+    // 导出 IndexedDB 教材正文
+    let textbookContent = {};
+    try {
+      const db = await idbDbP;
+      const allContent = await new Promise((resolve, reject) => {
+        const tx = db.transaction(IDB_STORE, "readonly");
+        const req = tx.objectStore(IDB_STORE).getAll();
+        req.onsuccess = () => resolve(req.result || []);
+        req.onerror = () => reject(req.error);
+      });
+      allContent.forEach((row) => {
+        textbookContent[row.textbook_id] = row.content;
+      });
+    } catch (e) {
+      console.warn("[export idb]", e);
+    }
     const data = {
-      version: 1,
+      version: 2,
       exported_at: new Date().toISOString(),
       config: getConfig(),
       textbooks: getCustomTextbooks(),
+      textbook_content: textbookContent,
       lessons: getLessons(),
     };
     // 导出时包含 api_key 便于迁移，但用户需自行保管文件
@@ -759,7 +1167,7 @@
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-    toast("已导出（含 API Key，请妥善保管文件）", "success");
+    toast("已导出（含 API Key 与教材正文，请妥善保管文件）", "success");
   }
 
   function triggerImport() {
@@ -770,13 +1178,13 @@
     const file = e.target.files[0];
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = (ev) => {
+    reader.onload = async (ev) => {
       try {
         const data = JSON.parse(ev.target.result);
         if (!data || typeof data !== "object") throw new Error("文件格式不正确");
         let merged = 0;
         if (Array.isArray(data.textbooks)) {
-          const cur = getCustomTextbooks();
+          const cur = lsGet(SK.TEXTBOOKS, []);
           data.textbooks.forEach((tb) => {
             if (tb && tb.id && !cur.find((t) => t.id === tb.id)) {
               cur.push(tb);
@@ -784,6 +1192,16 @@
             }
           });
           lsSet(SK.TEXTBOOKS, cur);
+        }
+        // 导入教材正文到 IndexedDB
+        if (data.textbook_content && typeof data.textbook_content === "object") {
+          for (const [tid, contentMap] of Object.entries(data.textbook_content)) {
+            try {
+              await idbPutContent(tid, contentMap);
+            } catch (err) {
+              console.warn("[import idb]", tid, err);
+            }
+          }
         }
         if (Array.isArray(data.lessons)) {
           const cur = getLessons();
@@ -813,11 +1231,12 @@
   }
 
   function clearAllData() {
-    if (!confirm("将清空所有自定义教材、教案和 LLM 配置。此操作不可撤销，建议先导出备份。继续？")) return;
+    if (!confirm("将清空所有自定义教材、教案、教材正文和 LLM 配置。此操作不可撤销，建议先导出备份。继续？")) return;
     if (!confirm("再次确认：真的要清空所有数据吗？")) return;
     localStorage.removeItem(SK.CONFIG);
     localStorage.removeItem(SK.TEXTBOOKS);
     localStorage.removeItem(SK.LESSONS);
+    idbClearAll().catch((e) => console.warn("[idb clear]", e));
     toast("已清空所有数据", "success");
     updateSetupBanner();
     loadTextbooks();
@@ -843,6 +1262,26 @@
     $("#modalAddTextbook").addEventListener("click", (e) => {
       if (e.target.id === "modalAddTextbook") closeAddTextbookModal();
     });
+
+    // PDF 导入向导
+    $("#btnOpenImportPdf").addEventListener("click", openImportPdfModal);
+    $("#closeImportPdf").addEventListener("click", closeImportPdfModal);
+    $("#ipCancel1").addEventListener("click", closeImportPdfModal);
+    $("#modalImportPdf").addEventListener("click", (e) => {
+      if (e.target.id === "modalImportPdf") closeImportPdfModal();
+    });
+    document.querySelectorAll('input[name="ipMode"]').forEach((r) => {
+      r.addEventListener("change", onImportModeChange);
+    });
+    $("#ipPdfFile").addEventListener("change", (e) => {
+      if (e.target.files && e.target.files[0]) handlePdfUpload(e.target.files[0]);
+    });
+    $("#ipGoStep2").addEventListener("click", goImportStep2);
+    $("#ipBackTo1").addEventListener("click", () => gotoImportStep(1));
+    $("#ipGoStep3").addEventListener("click", goImportStep3);
+    $("#ipBackTo2").addEventListener("click", () => gotoImportStep(2));
+    $("#ipConfirmImport").addEventListener("click", confirmImport);
+    $("#ipClosePreview").addEventListener("click", () => $("#ipPagePreview").classList.add("hidden"));
 
     ["#filterSubject", "#filterGrade", "#filterVersion"].forEach((sel) => {
       $(sel).addEventListener("change", renderTextbooks);
@@ -876,6 +1315,7 @@
 
   // ---------- 初始化 ----------
   document.addEventListener("DOMContentLoaded", () => {
+    initPdfJs();
     bindEvents();
     updateSetupBanner();
     loadTextbooks();

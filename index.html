@@ -7,6 +7,8 @@
   <link rel="stylesheet" href="./styles.css" />
   <!-- Markdown 渲染 -->
   <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+  <!-- PDF 文本提取 -->
+  <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
 </head>
 <body>
   <!-- 顶部导航 -->
@@ -201,6 +203,105 @@
             <button type="button" class="btn btn-ghost" id="cancelAddTextbook">取消</button>
           </div>
         </form>
+        <hr class="divider" />
+        <div class="form-row">
+          <label>从 PDF 教材导入（提取真实正文，生成更高质量教案）</label>
+          <button type="button" class="btn btn-ghost btn-block" id="btnOpenImportPdf">📥 从 PDF 导入教材</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- PDF 导入向导弹窗 -->
+  <div class="modal-mask hidden" id="modalImportPdf">
+    <div class="modal modal-wizard">
+      <div class="modal-header">
+        <h3>从 PDF 导入教材</h3>
+        <button class="modal-close" id="closeImportPdf">×</button>
+      </div>
+      <div class="modal-body">
+        <!-- 向导进度 -->
+        <div class="import-wizard-progress">
+          <div class="iwp-step active" data-step="1"><span class="iwp-num">1</span><span class="iwp-label">上传</span></div>
+          <div class="iwp-line"></div>
+          <div class="iwp-step" data-step="2"><span class="iwp-num">2</span><span class="iwp-label">切分</span></div>
+          <div class="iwp-line"></div>
+          <div class="iwp-step" data-step="3"><span class="iwp-num">3</span><span class="iwp-label">确认</span></div>
+        </div>
+
+        <!-- 步骤1：上传 + 选择教材 -->
+        <div class="import-step" id="importStep1">
+          <div class="form-row">
+            <label>关联方式</label>
+            <div class="radio-group">
+              <label class="radio-item"><input type="radio" name="ipMode" value="link" checked /> 关联已有教材（复用章节结构，只填页码）</label>
+              <label class="radio-item"><input type="radio" name="ipMode" value="new" /> 新建教材（手动填写章节）</label>
+            </div>
+          </div>
+          <div class="form-row" id="ipLinkRow">
+            <label>选择已有教材 *</label>
+            <select id="ipLinkTextbook" class="select"></select>
+          </div>
+          <div id="ipNewFields" class="hidden">
+            <div class="form-row">
+              <label>学科 *</label>
+              <input type="text" id="ipSubject" class="input" placeholder="如：数学" />
+            </div>
+            <div class="form-row">
+              <label>年级 *</label>
+              <input type="text" id="ipGrade" class="input" placeholder="如：三年级" />
+            </div>
+            <div class="form-row">
+              <label>版本</label>
+              <input type="text" id="ipVersion" class="input" placeholder="如：人教版" />
+            </div>
+            <div class="form-row">
+              <label>教材名称 *</label>
+              <input type="text" id="ipTitle" class="input" placeholder="如：XX教科书（X年级上册）" />
+            </div>
+            <div class="form-row">
+              <label>章节（每行：章节名 | 课时1,课时2,…）</label>
+              <textarea id="ipChapters" class="textarea mono" placeholder="第一章 XXX | 课时一,课时二&#10;第二章 YYY | 课时三,课时四"></textarea>
+            </div>
+          </div>
+          <div class="form-row">
+            <label>上传 PDF 文件 *</label>
+            <input type="file" id="ipPdfFile" class="input" accept="application/pdf" />
+            <div class="hint-line" id="ipPdfStatus"></div>
+          </div>
+          <div class="form-actions">
+            <button type="button" class="btn btn-primary" id="ipGoStep2">下一步</button>
+            <button type="button" class="btn btn-ghost" id="ipCancel1">取消</button>
+          </div>
+        </div>
+
+        <!-- 步骤2：课时页码映射 -->
+        <div class="import-step hidden" id="importStep2">
+          <div class="hint-line">为每个课时填写 PDF 页码范围（如 5 或 5-7 或 5,8,10），可点"预览"查看提取文本。留空则该课时不提取正文。</div>
+          <div class="lesson-page-map" id="ipLessonPageMap"></div>
+          <div class="form-actions">
+            <button type="button" class="btn btn-ghost" id="ipBackTo1">上一步</button>
+            <button type="button" class="btn btn-primary" id="ipGoStep3">下一步</button>
+          </div>
+        </div>
+
+        <!-- 步骤3：确认 -->
+        <div class="import-step hidden" id="importStep3">
+          <div class="import-summary" id="ipSummary"></div>
+          <div class="form-actions">
+            <button type="button" class="btn btn-ghost" id="ipBackTo2">上一步</button>
+            <button type="button" class="btn btn-primary" id="ipConfirmImport">确认导入</button>
+          </div>
+        </div>
+
+        <!-- 页码预览浮层 -->
+        <div class="page-preview hidden" id="ipPagePreview">
+          <div class="page-preview-header">
+            <span>文本预览</span>
+            <button class="modal-close" id="ipClosePreview">×</button>
+          </div>
+          <pre class="page-preview-body" id="ipPreviewBody"></pre>
+        </div>
       </div>
     </div>
   </div>
