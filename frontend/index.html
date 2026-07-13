@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>教材教案生成器</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+  <!-- Markdown 渲染 -->
+  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+</head>
+<body>
+  <!-- 顶部导航 -->
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand" id="brandHome">
+        <span class="brand-icon">📖</span>
+        <span class="brand-text">教材教案生成器</span>
+      </div>
+      <nav class="nav-actions">
+        <button class="btn btn-ghost" id="navGenerate">生成教案</button>
+        <button class="btn btn-ghost" id="navLessons">我的教案</button>
+      </nav>
+    </div>
+  </header>
+
+  <main class="container">
+    <!-- 视图：生成流程 -->
+    <section id="viewGenerate" class="view active">
+      <!-- 步骤指示器 -->
+      <div class="stepper">
+        <div class="step active" data-step="1"><span class="step-num">1</span><span class="step-label">选教材</span></div>
+        <div class="step-line"></div>
+        <div class="step" data-step="2"><span class="step-num">2</span><span class="step-label">选课时</span></div>
+        <div class="step-line"></div>
+        <div class="step" data-step="3"><span class="step-num">3</span><span class="step-label">配参数</span></div>
+        <div class="step-line"></div>
+        <div class="step" data-step="4"><span class="step-num">4</span><span class="step-label">生成预览</span></div>
+      </div>
+
+      <!-- 步骤1：选教材 -->
+      <div class="step-panel" id="panel1">
+        <div class="panel-header">
+          <h2>选择教材</h2>
+          <button class="btn btn-primary" id="btnAddTextbook">+ 添加自定义教材</button>
+        </div>
+        <div class="filters">
+          <select id="filterSubject" class="select"><option value="">全部学科</option></select>
+          <select id="filterGrade" class="select"><option value="">全部年级</option></select>
+          <select id="filterVersion" class="select"><option value="">全部版本</option></select>
+        </div>
+        <div class="textbook-grid" id="textbookGrid">
+          <div class="empty-hint">加载中…</div>
+        </div>
+      </div>
+
+      <!-- 步骤2：选课时 -->
+      <div class="step-panel hidden" id="panel2">
+        <div class="panel-header">
+          <h2>选择课时 <span class="sub" id="tbTitleLabel"></span></h2>
+          <button class="btn btn-ghost" id="backTo1">← 返回</button>
+        </div>
+        <div class="chapter-tree" id="chapterTree"></div>
+      </div>
+
+      <!-- 步骤3：配参数 -->
+      <div class="step-panel hidden" id="panel3">
+        <div class="panel-header">
+          <h2>配置生成参数 <span class="sub" id="lessonPathLabel"></span></h2>
+          <button class="btn btn-ghost" id="backTo2">← 返回</button>
+        </div>
+        <form class="form" id="genForm">
+          <div class="form-row">
+            <label>课时名称</label>
+            <input type="text" id="fLessonTitle" class="input" required />
+          </div>
+          <div class="form-row">
+            <label>课时时长（分钟）</label>
+            <input type="number" id="fDuration" class="input" value="40" min="10" max="120" />
+          </div>
+          <div class="form-row">
+            <label>教学风格</label>
+            <select id="fStyle" class="select">
+              <option value="">默认</option>
+              <option value="讲授式">讲授式</option>
+              <option value="探究式">探究式</option>
+              <option value="合作学习">合作学习</option>
+              <option value="情境教学">情境教学</option>
+            </select>
+          </div>
+          <div class="form-row">
+            <label>班级学情描述</label>
+            <textarea id="fStudentLevel" class="textarea" placeholder="如：学生基础较好，已掌握…，对…较感兴趣"></textarea>
+          </div>
+          <div class="form-row">
+            <label>补充教学目标/要求</label>
+            <textarea id="fExtraObjectives" class="textarea" placeholder="如：侧重动手实验；结合生活实例；渗透德育等"></textarea>
+          </div>
+          <div class="form-actions">
+            <button type="submit" class="btn btn-primary btn-lg" id="btnGenerate">生成教案</button>
+          </div>
+        </form>
+      </div>
+
+      <!-- 步骤4：生成与预览 -->
+      <div class="step-panel hidden" id="panel4">
+        <div class="panel-header">
+          <h2>教案预览</h2>
+          <div class="panel-actions">
+            <button class="btn btn-ghost" id="btnEdit">编辑</button>
+            <button class="btn btn-ghost" id="btnPreview">预览</button>
+            <button class="btn btn-ghost" id="btnDownloadMd">下载 Markdown</button>
+            <button class="btn btn-ghost" id="btnPrint">打印 / PDF</button>
+            <button class="btn btn-ghost" id="btnNew">重新生成</button>
+          </div>
+        </div>
+        <div id="genLoading" class="loading hidden">
+          <div class="spinner"></div>
+          <p>正在生成教案，请稍候…</p>
+        </div>
+        <div id="lessonPreview" class="lesson-content markdown-body"></div>
+        <div id="lessonEditor" class="lesson-editor hidden">
+          <textarea id="lessonEditorArea" class="textarea mono"></textarea>
+          <div class="form-actions">
+            <button class="btn btn-primary" id="btnSaveLesson">保存修改</button>
+            <button class="btn btn-ghost" id="btnCancelEdit">取消</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 视图：我的教案 -->
+    <section id="viewLessons" class="view">
+      <div class="panel-header">
+        <h2>我的教案</h2>
+        <button class="btn btn-ghost" id="refreshLessons">刷新</button>
+      </div>
+      <div class="lessons-list" id="lessonsList">
+        <div class="empty-hint">加载中…</div>
+      </div>
+    </section>
+  </main>
+
+  <!-- 添加教材弹窗 -->
+  <div class="modal-mask hidden" id="modalAddTextbook">
+    <div class="modal">
+      <div class="modal-header">
+        <h3>添加自定义教材</h3>
+        <button class="modal-close" id="closeModal">×</button>
+      </div>
+      <div class="modal-body">
+        <form id="addTextbookForm">
+          <div class="form-row">
+            <label>学科 *</label>
+            <input type="text" id="atSubject" class="input" placeholder="如：数学" required />
+          </div>
+          <div class="form-row">
+            <label>年级 *</label>
+            <input type="text" id="atGrade" class="input" placeholder="如：三年级" required />
+          </div>
+          <div class="form-row">
+            <label>版本</label>
+            <input type="text" id="atVersion" class="input" placeholder="如：人教版" />
+          </div>
+          <div class="form-row">
+            <label>教材名称 *</label>
+            <input type="text" id="atTitle" class="input" placeholder="如：XX教科书（X年级上册）" required />
+          </div>
+          <div class="form-row">
+            <label>章节（每行：章节名 | 课时1,课时2,…）</label>
+            <textarea id="atChapters" class="textarea mono" placeholder="第一章 XXX | 课时一,课时二&#10;第二章 YYY | 课时三,课时四"></textarea>
+          </div>
+          <div class="form-actions">
+            <button type="submit" class="btn btn-primary">添加</button>
+            <button type="button" class="btn btn-ghost" id="cancelAddTextbook">取消</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast -->
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
