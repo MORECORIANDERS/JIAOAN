@@ -582,6 +582,77 @@ body {
   background: var(--success);
 }
 
+/* 横幅提示（未配置 API 时显示） */
+.banner {
+  max-width: 1100px;
+  margin: 16px auto 0;
+  padding: 12px 24px;
+  background: #fef3c7;
+  border: 1px solid #fcd34d;
+  border-radius: var(--radius);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: #92400e;
+  font-size: 14px;
+}
+
+.btn-sm {
+  padding: 5px 12px;
+  font-size: 13px;
+}
+
+/* 隐私提示 */
+.privacy-hint {
+  background: #ecfdf5;
+  border: 1px solid #a7f3d0;
+  color: #065f46;
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  font-size: 13px;
+  margin-bottom: 16px;
+  line-height: 1.6;
+}
+
+/* 表单内提示行 */
+.hint-line {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text-light);
+  line-height: 1.6;
+  word-break: break-all;
+}
+
+.hint-line a {
+  color: var(--primary);
+  text-decoration: none;
+}
+
+.hint-line a:hover {
+  text-decoration: underline;
+}
+
+.hint-line.success-text {
+  color: var(--success);
+}
+
+.hint-line.error-text {
+  color: var(--danger);
+}
+
+/* 分隔线 */
+.divider {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 20px 0;
+}
+
+/* 隐藏文件输入 */
+input[type="file"].hidden {
+  display: none;
+}
+
 /* 打印 */
 @media print {
   .topbar,
@@ -589,7 +660,9 @@ body {
   .panel-header,
   .panel-actions,
   .lesson-editor,
-  .form-actions {
+  .form-actions,
+  .banner,
+  .privacy-hint {
     display: none !important;
   }
 

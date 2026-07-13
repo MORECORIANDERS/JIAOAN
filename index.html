@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>教材教案生成器</title>
-  <link rel="stylesheet" href="/static/styles.css" />
+  <link rel="stylesheet" href="./styles.css" />
   <!-- Markdown 渲染 -->
   <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
 </head>
@@ -19,9 +19,16 @@
       <nav class="nav-actions">
         <button class="btn btn-ghost" id="navGenerate">生成教案</button>
         <button class="btn btn-ghost" id="navLessons">我的教案</button>
+        <button class="btn btn-ghost" id="navSettings">⚙ 设置</button>
       </nav>
     </div>
   </header>
+
+  <!-- 未配置 key 时的横幅提示 -->
+  <div id="setupBanner" class="banner hidden">
+    <span>⚠ 尚未配置 LLM API，生成功能不可用。</span>
+    <button class="btn btn-primary btn-sm" id="bannerSetup">立即配置</button>
+  </div>
 
   <main class="container">
     <!-- 视图：生成流程 -->
@@ -132,7 +139,14 @@
     <section id="viewLessons" class="view">
       <div class="panel-header">
         <h2>我的教案</h2>
-        <button class="btn btn-ghost" id="refreshLessons">刷新</button>
+        <div class="panel-actions">
+          <button class="btn btn-ghost" id="btnExportAll">导出全部</button>
+          <button class="btn btn-ghost" id="btnImport">导入</button>
+          <input type="file" id="importFileInput" accept="application/json" class="hidden" />
+        </div>
+      </div>
+      <div class="privacy-hint">
+        🔒 所有教案仅保存在你当前浏览器中（localStorage），不会上传到任何服务器。清除浏览器数据将导致丢失，请定期用"导出全部"备份。
       </div>
       <div class="lessons-list" id="lessonsList">
         <div class="empty-hint">加载中…</div>
@@ -178,9 +192,65 @@
     </div>
   </div>
 
+  <!-- 设置弹窗 -->
+  <div class="modal-mask hidden" id="modalSettings">
+    <div class="modal">
+      <div class="modal-header">
+        <h3>LLM API 设置</h3>
+        <button class="modal-close" id="closeSettings">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="privacy-hint">
+          🔒 你的 API Key 仅保存在本浏览器（localStorage），不会发送到任何第三方服务器（除你选择的 LLM 服务外）。请勿在公共电脑上保存。
+        </div>
+        <form id="settingsForm">
+          <div class="form-row">
+            <label>服务预设</label>
+            <select id="sPreset" class="select"></select>
+          </div>
+          <div class="form-row">
+            <label>API 端点 Base URL *</label>
+            <input type="text" id="sBaseUrl" class="input" placeholder="https://api.openai.com/v1" required />
+          </div>
+          <div class="form-row">
+            <label>模型名称 *</label>
+            <input type="text" id="sModel" class="input" placeholder="如 gpt-4o-mini / glm-4-flash" required />
+          </div>
+          <div class="form-row">
+            <label>API Key *</label>
+            <input type="password" id="sApiKey" class="input" placeholder="sk-..." required />
+            <div class="hint-line" id="keyUrlHint"></div>
+          </div>
+          <div class="form-row">
+            <label>请求超时（秒）</label>
+            <input type="number" id="sTimeout" class="input" value="60" min="10" max="300" />
+          </div>
+          <div class="form-row">
+            <label>备注</label>
+            <div class="hint-line" id="presetNote"></div>
+          </div>
+          <div class="form-actions">
+            <button type="button" class="btn btn-ghost" id="btnTestConnection">测试连接</button>
+            <button type="submit" class="btn btn-primary">保存</button>
+          </div>
+          <div id="testResult" class="hint-line"></div>
+        </form>
+        <hr class="divider" />
+        <div class="form-row">
+          <label>数据管理</label>
+          <div class="form-actions">
+            <button type="button" class="btn btn-ghost" id="btnExportData">导出全部数据</button>
+            <button type="button" class="btn btn-ghost btn-danger" id="btnClearData">清空所有数据</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Toast -->
   <div id="toast" class="toast hidden"></div>
 
-  <script src="/static/app.js"></script>
+  <script src="./data.js"></script>
+  <script src="./app.js"></script>
 </body>
 </html>
