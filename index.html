@@ -9,6 +9,8 @@
   <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
   <!-- PDF 文本提取 -->
   <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
+  <!-- OCR 兜底（扫描版 PDF，按需加载语言包） -->
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.0/dist/tesseract.min.js"></script>
 </head>
 <body>
   <!-- 顶部导航 -->
@@ -301,6 +303,33 @@
             <button class="modal-close" id="ipClosePreview">×</button>
           </div>
           <pre class="page-preview-body" id="ipPreviewBody"></pre>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 教材原文管理弹窗 -->
+  <div class="modal-mask hidden" id="modalTextbookContent">
+    <div class="modal modal-wizard">
+      <div class="modal-header">
+        <h3 id="tcModalTitle">教材原文管理</h3>
+        <button class="modal-close" id="closeContentModal">×</button>
+      </div>
+      <div class="modal-body">
+        <div id="tcSummary" class="import-summary"></div>
+        <div class="content-toolbar">
+          <button type="button" class="btn btn-ghost btn-sm" id="btnReimportPdf">📥 重新导入 PDF</button>
+          <button type="button" class="btn btn-ghost btn-sm btn-danger" id="btnClearContent">🗑 清空全部原文</button>
+        </div>
+        <div id="tcLessonList" class="tc-lesson-list"></div>
+
+        <!-- 原文预览浮层（复用样式） -->
+        <div class="page-preview hidden" id="tcPagePreview">
+          <div class="page-preview-header">
+            <span id="tcPreviewTitle">课时原文预览</span>
+            <button class="modal-close" id="tcClosePreview">×</button>
+          </div>
+          <pre class="page-preview-body" id="tcPreviewBody"></pre>
         </div>
       </div>
     </div>

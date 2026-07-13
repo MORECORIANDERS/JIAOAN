@@ -251,6 +251,48 @@
     );
   }
 
+  // 启发式结构化教材原文：识别定义、例题、正文，分块标注
+  function structureContent(content) {
+    if (!content) return "";
+    let units = content.split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean);
+    // 若只有单段（无空行分隔），按单行拆分以提升识别粒度
+    if (units.length === 1) {
+      units = units[0].split("\n").map((p) => p.trim()).filter(Boolean);
+    }
+    const defs = [];
+    const examples = [];
+    const main = [];
+    for (const p of units) {
+      const isDef =
+        /^定义[:：]/.test(p) ||
+        /就是|是指|叫做|称为|指的是/.test(p) ||
+        (p.length < 80 && /[称为做义]$/u.test(p));
+      const isExample = /^例[\s\d]|^例题|解[:：]/.test(p);
+      if (isDef) defs.push(p);
+      else if (isExample) examples.push(p);
+      else main.push(p);
+    }
+    const parts = [];
+    if (defs.length) parts.push("【定义与概念】\n" + defs.join("\n"));
+    if (examples.length) parts.push("【例题】\n" + examples.join("\n"));
+    if (main.length) parts.push("【正文】\n" + main.join("\n"));
+    return parts.join("\n\n");
+  }
+
+  // 按段落截断，避免切断定义/例题
+  function truncateByParagraph(text, maxLen) {
+    if (text.length <= maxLen) return text;
+    const paragraphs = text.split(/\n\s*\n/);
+    let result = "";
+    for (const p of paragraphs) {
+      const candidate = result ? result + "\n\n" + p : p;
+      if (candidate.length > maxLen) break;
+      result = candidate;
+    }
+    if (!result) result = text.slice(0, maxLen);
+    return result + "\n…（原文过长，已截断部分段落）";
+  }
+
   function buildUserPrompt(params, textbook, chapter, lessonTitle, lessonContent) {
     const lines = [
       `教材：${textbook.title}（${textbook.subject} · ${textbook.grade} · ${textbook.version}）`,
@@ -259,18 +301,16 @@
     lines.push(`课时：${lessonTitle}`);
     lines.push(`课时时长：${params.duration_minutes} 分钟`);
     if (lessonContent) {
-      const trimmed =
-        lessonContent.length > 15000
-          ? lessonContent.slice(0, 15000) + "\n…（原文过长已截断）"
-          : lessonContent;
-      lines.push(`\n【该课时教材原文】\n${trimmed}\n`);
+      const structured = structureContent(lessonContent);
+      const trimmed = truncateByParagraph(structured, 15000);
+      lines.push(`\n【该课时教材原文（已结构化清洗）】\n${trimmed}\n`);
     }
     if (params.student_level) lines.push(`班级学情：${params.student_level}`);
     if (params.extra_objectives) lines.push(`补充教学目标/要求：${params.extra_objectives}`);
     if (params.style) lines.push(`教学风格倾向：${params.style}`);
     lines.push(
       lessonContent
-        ? "\n请严格基于上述教材原文生成完整教案，知识点、例题、定义应与原文一致，不得编造原文未涉及的内容。"
+        ? "\n请严格基于上述教材原文生成完整教案。要求：1. 知识点、定义、例题应与原文一致，不得编造原文未涉及的内容；2. 教学过程中的例题可引用或改编原文例题；3. 重点难点应从原文实际内容提炼，而非泛泛而谈。"
         : "\n请根据以上信息生成完整教案。"
     );
     return lines.join("\n");
@@ -428,12 +468,18 @@
             ${t.version ? `<span>· ${escapeHtml(t.version)}</span>` : ""}
           </div>
           ${isCustom ? `<div class="tc-badge">自定义</div>` : ""}
-          ${t.has_content ? `<div class="tc-content-badge">📄 含教材原文</div>` : ""}
+          ${t.has_content ? `<div class="tc-content-row"><div class="tc-content-badge">📄 含教材原文</div><button type="button" class="btn btn-ghost tc-view-content" data-tbid="${escapeHtml(t.id)}">查看原文</button></div>` : ""}
         </div>`;
       })
       .join("");
     grid.querySelectorAll(".textbook-card").forEach((card) => {
       card.addEventListener("click", () => selectTextbook(card.dataset.id));
+    });
+    grid.querySelectorAll(".tc-view-content").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        openContentModal(btn.dataset.tbid);
+      });
     });
   }
 
@@ -583,6 +629,153 @@
     $("#ipNewFields").classList.toggle("hidden", mode !== "new");
   }
 
+  // ---------- PDF 文本清洗 ----------
+  // 清洗单页 PDF 文本：按坐标分行、断行修正、段落恢复
+  function cleanPdfPageText(textItems) {
+    if (!textItems || !textItems.length) return "";
+    // 1. 按 transform[5]（y 坐标）分行，同行按 transform[4]（x 坐标）排序
+    const sorted = textItems.slice().sort((a, b) => {
+      const ya = a.transform[5];
+      const yb = b.transform[5];
+      if (Math.abs(ya - yb) > 2) return yb - ya; // y 大的在上（PDF 坐标系 y 向上）
+      return a.transform[4] - b.transform[4]; // 同行按 x 升序
+    });
+    const lines = [];
+    let currentY = null;
+    let currentLine = [];
+    for (const it of sorted) {
+      const y = it.transform[5];
+      if (currentY === null || Math.abs(y - currentY) <= 2) {
+        currentLine.push(it.str);
+        currentY = currentY === null ? y : currentY;
+      } else {
+        if (currentLine.length) lines.push(currentLine.join("").trim());
+        currentLine = [it.str];
+        currentY = y;
+      }
+    }
+    if (currentLine.length) lines.push(currentLine.join("").trim());
+
+    // 2. 断行修正：行尾非句末标点且下一行非引号/括号开头时，合并到上一行
+    const merged = [];
+    for (const raw of lines) {
+      const line = String(raw || "").trim();
+      if (!line) continue;
+      const last = merged.length ? merged[merged.length - 1] : null;
+      if (
+        last &&
+        !/[。！？；：.!?!"'）】》」』]$/.test(last) &&
+        !/^["'（【《「『]/.test(line)
+      ) {
+        const sep = /[\u4e00-\u9fa5]$/.test(last) && /^[\u4e00-\u9fa5]/.test(line) ? "" : " ";
+        merged[merged.length - 1] = last + sep + line;
+      } else {
+        merged.push(line);
+      }
+    }
+
+    // 3. 段落恢复：连续的行合并为段落，空行作为段落分隔
+    return merged.filter(Boolean).join("\n");
+  }
+
+  // 跨页页眉页脚检测：统计每页首尾行，找出在 >=50% 页面重复出现的行
+  function detectHeaderFooter(pagesText) {
+    const headCount = {};
+    const footCount = {};
+    const totalPages = pagesText.length;
+    for (const text of pagesText) {
+      if (!text) continue;
+      const lines = text.split("\n").filter(Boolean);
+      if (lines.length > 0) {
+        const h = lines[0].trim();
+        if (h) headCount[h] = (headCount[h] || 0) + 1;
+      }
+      if (lines.length > 1) {
+        const f = lines[lines.length - 1].trim();
+        if (f) footCount[f] = (footCount[f] || 0) + 1;
+      }
+    }
+    const threshold = Math.max(2, totalPages * 0.5);
+    const headers = Object.keys(headCount).filter((k) => headCount[k] >= threshold && k.length < 30);
+    const footers = Object.keys(footCount).filter((k) => footCount[k] >= threshold && k.length < 30);
+    return {
+      headers,
+      footers,
+      pagePattern: /^\d{1,3}$|^第\s*\d+\s*页$|^\d+\s*\/\s*\d+$/,
+    };
+  }
+
+  // 从单页文本中移除页眉页脚
+  function stripHeaderFooter(text, hf) {
+    let lines = text.split("\n");
+    if (
+      lines.length &&
+      (hf.headers.includes(lines[0].trim()) || hf.pagePattern.test(lines[0].trim()))
+    ) {
+      lines = lines.slice(1);
+    }
+    if (
+      lines.length &&
+      (hf.footers.includes(lines[lines.length - 1].trim()) ||
+        hf.pagePattern.test(lines[lines.length - 1].trim()))
+    ) {
+      lines = lines.slice(0, -1);
+    }
+    return lines.join("\n").trim();
+  }
+
+  // ---------- OCR 兜底（扫描版 PDF） ----------
+  const ocrState = { enabled: false, running: false };
+
+  // 清洗 OCR 输出文本：轻量断行修正 + 段落恢复（无坐标信息）
+  function cleanOcrText(rawText) {
+    if (!rawText) return "";
+    const lines = String(rawText)
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean);
+    const merged = [];
+    for (const line of lines) {
+      const last = merged.length ? merged[merged.length - 1] : null;
+      if (
+        last &&
+        !/[。！？；：.!?!"'）】》」』]$/.test(last) &&
+        !/^["'（【《「『]/.test(line)
+      ) {
+        const sep = /[\u4e00-\u9fa5]$/.test(last) && /^[\u4e00-\u9fa5]/.test(line) ? "" : " ";
+        merged[merged.length - 1] = last + sep + line;
+      } else {
+        merged.push(line);
+      }
+    }
+    return merged.join("\n");
+  }
+
+  // 对扫描版 PDF 逐页渲染 canvas 并 OCR，返回 { pageNum: cleanedText }
+  async function runOcrForPdf(pdf) {
+    const cache = {};
+    for (let i = 1; i <= pdf.numPages; i++) {
+      $("#ipPdfStatus").textContent = `OCR 识别中：第 ${i}/${pdf.numPages} 页…`;
+      const page = await pdf.getPage(i);
+      const viewport = page.getViewport({ scale: 1.5 });
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.ceil(viewport.width);
+      canvas.height = Math.ceil(viewport.height);
+      const ctx = canvas.getContext("2d");
+      await page.render({ canvasContext: ctx, viewport }).promise;
+      const result = await Tesseract.recognize(canvas, "chi_sim+eng", {
+        logger: (m) => {
+          if (m && m.status === "recognizing text") {
+            $("#ipPdfStatus").textContent =
+              `OCR 识别中：第 ${i}/${pdf.numPages} 页，进度 ${Math.round((m.progress || 0) * 100)}%`;
+          }
+        },
+      });
+      cache[i] = cleanOcrText(result?.data?.text || "");
+    }
+    return cache;
+  }
+
   // 解析 PDF 文本
   async function handlePdfUpload(file) {
     if (!file) return;
@@ -595,19 +788,56 @@
       const buf = await file.arrayBuffer();
       const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
       importState.pdfPageCount = pdf.numPages;
-      const cache = {};
+      // 1. 逐页提取并清洗
+      const rawPages = {};
       for (let i = 1; i <= pdf.numPages; i++) {
         const page = await pdf.getPage(i);
         const tc = await page.getTextContent();
-        cache[i] = tc.items.map((it) => it.str).join("");
+        rawPages[i] = cleanPdfPageText(tc.items);
+      }
+      // 2. 检测页眉页脚并移除
+      const hf = detectHeaderFooter(Object.values(rawPages));
+      const cache = {};
+      for (let i = 1; i <= pdf.numPages; i++) {
+        cache[i] = stripHeaderFooter(rawPages[i], hf);
       }
       importState.pdfPagesCache = cache;
-      const totalChars = Object.values(cache).reduce((s, t) => s + t.length, 0);
+      let totalChars = Object.values(cache).reduce((s, t) => s + (t ? t.length : 0), 0);
+      // 3. 文本极少时询问是否启用 OCR（扫描版兜底）
       if (totalChars < 50) {
-        $("#ipPdfStatus").textContent =
-          `⚠ 共 ${pdf.numPages} 页，但提取到的文本极少。该 PDF 可能是扫描版（图片），暂不支持 OCR。`;
+        if (
+          window.Tesseract &&
+          confirm(
+            `该 PDF 提取到的文本极少（${totalChars} 字），可能是扫描版（图片）。\n是否启用 OCR 识别？\n（速度较慢，首次需下载语言包约 10MB）`
+          )
+        ) {
+          ocrState.running = true;
+          try {
+            const ocrCache = await runOcrForPdf(pdf);
+            for (const k in ocrCache) cache[k] = ocrCache[k];
+            importState.pdfPagesCache = cache;
+            totalChars = Object.values(cache).reduce((s, t) => s + (t ? t.length : 0), 0);
+            if (totalChars < 50) {
+              $("#ipPdfStatus").textContent =
+                `⚠ OCR 识别后文本仍极少（${totalChars} 字），可能 PDF 质量较差或为空白页。`;
+            } else {
+              $("#ipPdfStatus").textContent =
+                `✓ OCR 识别完成，共 ${pdf.numPages} 页，约 ${totalChars} 字。`;
+            }
+          } catch (e) {
+            $("#ipPdfStatus").textContent = "❌ OCR 识别失败：" + (e?.message || e);
+            console.error("[ocr]", e);
+          } finally {
+            ocrState.running = false;
+          }
+        } else {
+          $("#ipPdfStatus").textContent =
+            `⚠ 共 ${pdf.numPages} 页，但提取到的文本极少。该 PDF 可能是扫描版（图片）。` +
+            (window.Tesseract ? "可重新上传并选择启用 OCR。" : "暂未加载 OCR 库。");
+        }
       } else {
-        $("#ipPdfStatus").textContent = `✓ 已解析 ${pdf.numPages} 页，共约 ${totalChars} 字。`;
+        $("#ipPdfStatus").textContent =
+          `✓ 已解析 ${pdf.numPages} 页，共约 ${totalChars} 字（已清洗段落、过滤页眉页脚）。`;
       }
     } catch (e) {
       $("#ipPdfStatus").textContent = "❌ 解析失败：" + (e?.message || e);
@@ -710,6 +940,7 @@
           <div class="lpm-row" data-ch="${escapeHtml(ch.id)}" data-lesson="${escapeHtml(ln)}">
             <span class="lpm-name" title="${escapeHtml(ln)}">${escapeHtml(ln)}</span>
             <input type="text" class="input lpm-pages" placeholder="如 5-7" />
+            <span class="lpm-chars">0 字</span>
             <button type="button" class="btn btn-ghost lpm-preview-btn">预览</button>
           </div>`
           )
@@ -720,10 +951,24 @@
       })
       .join("");
     wrap.innerHTML = html;
-    // 预览按钮
+    // 实时字数 + 预览
     wrap.querySelectorAll(".lpm-row").forEach((row) => {
       const btn = row.querySelector(".lpm-preview-btn");
       const input = row.querySelector(".lpm-pages");
+      const charsSpan = row.querySelector(".lpm-chars");
+      const updateChars = () => {
+        const pages = parsePageRange(input.value, importState.pdfPageCount);
+        if (pages.length === 0) {
+          charsSpan.textContent = "0 字";
+          charsSpan.classList.remove("has");
+          return;
+        }
+        const text = pages.map((p) => importState.pdfPagesCache[p] || "").join("\n\n");
+        const len = text.length;
+        charsSpan.textContent = `${len} 字`;
+        charsSpan.classList.toggle("has", len > 0);
+      };
+      input.addEventListener("input", updateChars);
       btn.addEventListener("click", () => {
         const pages = parsePageRange(input.value, importState.pdfPageCount);
         if (pages.length === 0) {
@@ -815,6 +1060,214 @@
     loadTextbooks();
   }
 
+  // ---------- 教材原文管理 ----------
+  const contentModalState = { textbookId: null, textbook: null, contentMap: null };
+
+  function closeContentModal() {
+    $("#modalTextbookContent").classList.add("hidden");
+    $("#tcPagePreview").classList.add("hidden");
+  }
+
+  async function openContentModal(textbookId) {
+    const tb = state.textbooks.find((t) => t.id === textbookId);
+    if (!tb) {
+      toast("教材不存在", "error");
+      return;
+    }
+    contentModalState.textbookId = textbookId;
+    contentModalState.textbook = tb;
+    $("#tcModalTitle").textContent = `教材原文管理 — ${tb.title}`;
+    $("#tcPreviewBody").textContent = "";
+    $("#tcPagePreview").classList.add("hidden");
+    let contentMap = null;
+    try {
+      contentMap = await idbGetContent(textbookId);
+    } catch (e) {
+      console.warn("[load content]", e);
+    }
+    contentModalState.contentMap = contentMap || {};
+    renderTcSummary(tb, contentModalState.contentMap);
+    renderTcLessonList(tb, contentModalState.contentMap);
+    $("#modalTextbookContent").classList.remove("hidden");
+  }
+
+  function renderTcSummary(tb, contentMap) {
+    const chapters = tb.chapters || [];
+    let total = 0;
+    let filled = 0;
+    let totalChars = 0;
+    chapters.forEach((ch) => {
+      (ch.lessons || []).forEach((ln) => {
+        total++;
+        const text = contentMap[`${ch.id}|${ln}`];
+        if (text) {
+          filled++;
+          totalChars += text.length;
+        }
+      });
+    });
+    $("#tcSummary").innerHTML = `
+      <div class="is-row"><span>教材</span><span class="is-val">${escapeHtml(tb.title)}</span></div>
+      <div class="is-row"><span>总课时数</span><span class="is-val">${total}</span></div>
+      <div class="is-row"><span>已导入正文课时</span><span class="is-val">${filled}</span></div>
+      <div class="is-row"><span>正文总字数</span><span class="is-val">约 ${totalChars} 字</span></div>
+    `;
+  }
+
+  function renderTcLessonList(tb, contentMap) {
+    const wrap = $("#tcLessonList");
+    const chapters = tb.chapters || [];
+    if (chapters.length === 0) {
+      wrap.innerHTML = `<div class="empty-hint">该教材暂无章节结构</div>`;
+      return;
+    }
+    const html = chapters
+      .map((ch) => {
+        const rows = (ch.lessons || [])
+          .map((ln) => {
+            const key = `${ch.id}|${ln}`;
+            const text = contentMap[key] || "";
+            const chars = text.length;
+            return `
+          <div class="tc-lesson-row" data-key="${escapeHtml(key)}">
+            <div class="tclr-head">
+              <span class="tclr-name" title="${escapeHtml(ln)}">${escapeHtml(ln)}</span>
+              <span class="tclr-chars ${chars ? "" : "empty"}">${chars ? `${chars} 字` : "未导入"}</span>
+              <div class="tclr-actions">
+                <button type="button" class="btn btn-ghost" data-act="edit">${chars ? "编辑" : "补充"}</button>
+                <button type="button" class="btn btn-ghost" data-act="preview" ${chars ? "" : "disabled"}>预览</button>
+                <button type="button" class="btn btn-ghost btn-danger" data-act="clear" ${chars ? "" : "disabled"}>清空</button>
+              </div>
+            </div>
+          </div>`;
+          })
+          .join("");
+        return `
+        <div class="tc-lesson-group">${escapeHtml(ch.title)}</div>
+        ${rows || `<div class="empty-hint">该章节无课时</div>`}`;
+      })
+      .join("");
+    wrap.innerHTML = html;
+  }
+
+  function startEditTcLesson(row, key) {
+    if (row.querySelector(".tc-lesson-edit")) return;
+    const text = contentModalState.contentMap[key] || "";
+    const editHtml = `
+      <div class="tc-lesson-edit">
+        <textarea class="textarea mono">${escapeHtml(text)}</textarea>
+        <div class="tclr-edit-actions">
+          <button type="button" class="btn btn-primary btn-sm" data-act="save-edit">保存</button>
+          <button type="button" class="btn btn-ghost btn-sm" data-act="cancel-edit">取消</button>
+        </div>
+      </div>`;
+    row.insertAdjacentHTML("beforeend", editHtml);
+  }
+
+  function cancelEditTcLesson(row) {
+    const edit = row.querySelector(".tc-lesson-edit");
+    if (edit) edit.remove();
+  }
+
+  async function saveEditTcLesson(row, key) {
+    const ta = row.querySelector(".tc-lesson-edit textarea");
+    if (!ta) return;
+    const val = ta.value;
+    if (val && val.trim()) {
+      contentModalState.contentMap[key] = val.trim();
+    } else {
+      delete contentModalState.contentMap[key];
+    }
+    try {
+      await idbPutContent(contentModalState.textbookId, contentModalState.contentMap);
+    } catch (e) {
+      toast("保存失败：" + (e?.message || e), "error");
+      return;
+    }
+    toast("已保存该课时原文", "success");
+    renderTcSummary(contentModalState.textbook, contentModalState.contentMap);
+    renderTcLessonList(contentModalState.textbook, contentModalState.contentMap);
+  }
+
+  function previewTcLesson(key) {
+    const text = contentModalState.contentMap[key] || "";
+    $("#tcPreviewBody").textContent = text || "（该课时暂无原文）";
+    $("#tcPagePreview").classList.remove("hidden");
+  }
+
+  async function clearTcLesson(key) {
+    if (!confirm("确定清空该课时的教材原文？此操作不可撤销。")) return;
+    delete contentModalState.contentMap[key];
+    try {
+      await idbPutContent(contentModalState.textbookId, contentModalState.contentMap);
+    } catch (e) {
+      toast("清空失败：" + (e?.message || e), "error");
+      return;
+    }
+    toast("已清空该课时原文", "success");
+    renderTcSummary(contentModalState.textbook, contentModalState.contentMap);
+    renderTcLessonList(contentModalState.textbook, contentModalState.contentMap);
+  }
+
+  async function clearAllContent(textbookId) {
+    if (!confirm("确定清空该教材的所有原文？教材元信息保留，可重新导入。此操作不可撤销。")) return;
+    try {
+      await idbDeleteContent(textbookId);
+    } catch (e) {
+      console.warn("[clear all content]", e);
+    }
+    // 清除 has_content 标记
+    const customs = lsGet(SK.TEXTBOOKS, []);
+    const idx = customs.findIndex((t) => t.id === textbookId);
+    if (idx >= 0) {
+      if (customs[idx]._override) {
+        customs.splice(idx, 1);
+      } else {
+        delete customs[idx].has_content;
+      }
+      lsSet(SK.TEXTBOOKS, customs);
+    }
+    toast("已清空该教材全部原文", "success");
+    closeContentModal();
+    loadTextbooks();
+  }
+
+  function reimportFromContentModal() {
+    const tbId = contentModalState.textbookId;
+    if (!tbId) return;
+    closeContentModal();
+    openImportPdfModal();
+    setTimeout(() => {
+      const sel = $("#ipLinkTextbook");
+      if (sel) sel.value = tbId;
+    }, 0);
+  }
+
+  // 原文质量自检：返回 { ok, warnings }
+  function checkContentQuality(content, lessonTitle) {
+    const warnings = [];
+    if (!content) {
+      return {
+        ok: false,
+        warnings: ["该课时没有教材原文（未导入或页码未填写），将仅凭课时名生成，质量可能较低。"],
+      };
+    }
+    if (content.length < 100) {
+      warnings.push(
+        `该课时原文仅 ${content.length} 字，过少。可能页码映射有误，建议到「教材原文管理」检查。`
+      );
+    }
+    // 关键词匹配：从课时名提取 2 字以上中文片段，检查是否在原文出现
+    const stopWords = ["的认识", "的应用", "练习", "复习", "的认识"];
+    const keywords = (lessonTitle.match(/[\u4e00-\u9fa5]{2,}/g) || [])
+      .filter((k) => k.length >= 2 && !stopWords.includes(k));
+    const missing = keywords.filter((k) => !content.includes(k));
+    if (keywords.length && missing.length === keywords.length) {
+      warnings.push(`课时名关键词（${keywords.join("、")}）均未在原文中出现，可能页码映射错误。`);
+    }
+    return { ok: warnings.length === 0, warnings };
+  }
+
   // ---------- 生成教案 ----------
   async function submitGenerate(e) {
     e.preventDefault();
@@ -854,6 +1307,20 @@
           }
         } catch (e) {
           console.warn("[load lesson content]", e);
+        }
+      }
+      // 原文质量自检：仅在"该教材标记有原文"但实际取不到/过少/关键词不匹配时提示
+      if (state.selectedTextbook.has_content) {
+        const q = checkContentQuality(lessonContent, params.lesson_title);
+        if (!q.ok) {
+          const go = confirm(
+            "⚠ 原文质量提示：\n\n" + q.warnings.join("\n") + "\n\n是否仍然继续生成？"
+          );
+          if (!go) {
+            $("#genLoading").classList.add("hidden");
+            $("#emptyPreview").classList.remove("hidden");
+            return;
+          }
         }
       }
       const sys = buildSystemPrompt();
@@ -1150,7 +1617,7 @@
       console.warn("[export idb]", e);
     }
     const data = {
-      version: 2,
+      version: 3,
       exported_at: new Date().toISOString(),
       config: getConfig(),
       textbooks: getCustomTextbooks(),
@@ -1295,6 +1762,32 @@
     $("#btnCancelEdit").addEventListener("click", exitEditMode);
     $("#btnDownloadMd").addEventListener("click", downloadMarkdown);
     $("#btnPrint").addEventListener("click", printLesson);
+
+    // 教材原文管理弹窗
+    $("#closeContentModal").addEventListener("click", closeContentModal);
+    $("#modalTextbookContent").addEventListener("click", (e) => {
+      if (e.target.id === "modalTextbookContent") closeContentModal();
+    });
+    $("#btnClearContent").addEventListener("click", () => {
+      if (contentModalState.textbookId) clearAllContent(contentModalState.textbookId);
+    });
+    $("#btnReimportPdf").addEventListener("click", reimportFromContentModal);
+    $("#tcClosePreview").addEventListener("click", () =>
+      $("#tcPagePreview").classList.add("hidden")
+    );
+    $("#tcLessonList").addEventListener("click", (e) => {
+      const btn = e.target.closest("button[data-act]");
+      if (!btn) return;
+      const row = btn.closest(".tc-lesson-row");
+      if (!row) return;
+      const key = row.dataset.key;
+      const act = btn.dataset.act;
+      if (act === "edit") startEditTcLesson(row, key);
+      else if (act === "preview") previewTcLesson(key);
+      else if (act === "clear") clearTcLesson(key);
+      else if (act === "save-edit") saveEditTcLesson(row, key);
+      else if (act === "cancel-edit") cancelEditTcLesson(row);
+    });
 
     // 设置弹窗
     $("#closeSettings").addEventListener("click", closeSettingsModal);
