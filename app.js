@@ -17,7 +17,6 @@
   // ---------- 状态 ----------
   const state = {
     view: "generate",
-    step: 1,
     textbooks: [], // 预置 + 自定义合并
     selectedTextbook: null,
     selectedChapter: null,
@@ -273,15 +272,22 @@
     }
   }
 
-  function goStep(step) {
-    state.step = step;
-    $$(".step").forEach((el) => {
-      const n = parseInt(el.dataset.step, 10);
-      el.classList.toggle("active", n === step);
-      el.classList.toggle("done", n < step);
-    });
-    $$(".step-panel").forEach((el) => el.classList.add("hidden"));
-    $(`#panel${step}`).classList.remove("hidden");
+  // 重置左栏到初始状态（仅显示年级与教材选择）
+  function resetLeftPanel() {
+    state.selectedTextbook = null;
+    state.selectedChapter = null;
+    state.selectedLesson = "";
+    $("#chapterSection").classList.add("hidden");
+    $("#paramsSection").classList.add("hidden");
+  }
+
+  // 显示右侧空状态
+  function showEmptyPreview() {
+    state.currentLessonId = null;
+    $("#emptyPreview").classList.remove("hidden");
+    $("#genLoading").classList.add("hidden");
+    $("#lessonPreview").classList.add("hidden");
+    $("#lessonEditor").classList.add("hidden");
   }
 
   // ---------- 教材渲染 ----------
@@ -349,7 +355,11 @@
     state.selectedLesson = "";
     $("#tbTitleLabel").textContent = `— ${tb.title}`;
     renderChapters(tb);
-    goStep(2);
+    // 显示章节区，隐藏参数区
+    $("#chapterSection").classList.remove("hidden");
+    $("#paramsSection").classList.add("hidden");
+    // 滚动到章节区
+    $("#chapterSection").scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
   function renderChapters(tb) {
@@ -386,7 +396,9 @@
         state.selectedLesson = lesson;
         $("#lessonPathLabel").textContent = `— ${ch.title} / ${lesson}`;
         $("#fLessonTitle").value = lesson;
-        goStep(3);
+        // 显示参数区
+        $("#paramsSection").classList.remove("hidden");
+        $("#paramsSection").scrollIntoView({ behavior: "smooth", block: "start" });
       });
     });
   }
@@ -455,9 +467,9 @@
       return;
     }
     $("#genLoading").classList.remove("hidden");
+    $("#emptyPreview").classList.add("hidden");
     $("#lessonPreview").classList.add("hidden");
     $("#lessonEditor").classList.add("hidden");
-    goStep(4);
     try {
       const sys = buildSystemPrompt();
       const user = buildUserPrompt(params, state.selectedTextbook, state.selectedChapter, params.lesson_title);
@@ -481,6 +493,7 @@
       toast("教案生成成功", "success");
     } catch (e) {
       $("#genLoading").classList.add("hidden");
+      $("#emptyPreview").classList.remove("hidden");
       const msg = e?.message || String(e);
       toast(msg, "error");
       console.error("[generate error]", e);
@@ -489,6 +502,7 @@
 
   function renderLessonPreview(markdown) {
     $("#genLoading").classList.add("hidden");
+    $("#emptyPreview").classList.add("hidden");
     const html = window.marked ? marked.parse(markdown) : `<pre>${escapeHtml(markdown)}</pre>`;
     $("#lessonPreview").innerHTML = html;
     $("#lessonPreview").classList.remove("hidden");
@@ -584,7 +598,6 @@
     }
     state.currentLessonId = lesson.id;
     switchView("generate");
-    goStep(4);
     $("#genLoading").classList.add("hidden");
     $("#lessonEditor").classList.add("hidden");
     renderLessonPreview(lesson.content);
@@ -815,7 +828,8 @@
   function bindEvents() {
     $("#brandHome").addEventListener("click", () => {
       switchView("generate");
-      goStep(1);
+      resetLeftPanel();
+      showEmptyPreview();
     });
     $("#navGenerate").addEventListener("click", () => switchView("generate"));
     $("#navLessons").addEventListener("click", () => switchView("lessons"));
@@ -834,8 +848,6 @@
       $(sel).addEventListener("change", renderTextbooks);
     });
 
-    $("#backTo1").addEventListener("click", () => goStep(1));
-    $("#backTo2").addEventListener("click", () => goStep(2));
     $("#genForm").addEventListener("submit", submitGenerate);
 
     $("#btnEdit").addEventListener("click", enterEditMode);
@@ -844,7 +856,6 @@
     $("#btnCancelEdit").addEventListener("click", exitEditMode);
     $("#btnDownloadMd").addEventListener("click", downloadMarkdown);
     $("#btnPrint").addEventListener("click", printLesson);
-    $("#btnNew").addEventListener("click", () => goStep(3));
 
     // 设置弹窗
     $("#closeSettings").addEventListener("click", closeSettingsModal);
@@ -868,5 +879,6 @@
     bindEvents();
     updateSetupBanner();
     loadTextbooks();
+    showEmptyPreview();
   });
 })();
