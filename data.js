@@ -73,6 +73,13 @@ window.PRESET_TEXTBOOKS = [
 // 常见 LLM 服务预设（用户可在设置中自定义）
 window.LLM_PRESETS = [
   {
+    name: "Agnes AI",
+    base_url: "https://apihub.agnes-ai.com/v1",
+    model: "agnes-2.0-flash",
+    key_url: "https://platform.agnes-ai.com",
+    note: "免费、无需绑卡、OpenAI 兼容。文本模型 agnes-2.0-flash 支持长上下文。注册后在控制台复制 API Key 即可。"
+  },
+  {
     name: "智谱 GLM",
     base_url: "https://open.bigmodel.cn/api/paas/v4",
     model: "glm-4-flash",
