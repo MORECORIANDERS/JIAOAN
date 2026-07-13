@@ -33,7 +33,9 @@
     return String(s || "")
       .replace(/&/g, "&amp;")
       .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;");
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
   }
 
   function toast(msg, type = "") {
@@ -185,6 +187,11 @@
     return lsGet(SK.TEXTBOOKS, []).filter((t) => !t._override);
   }
 
+  // 预置教材的覆盖标记（has_content 等），导出/导入时需保留
+  function getOverrideEntries() {
+    return lsGet(SK.TEXTBOOKS, []).filter((t) => t._override);
+  }
+
   function addCustomTextbook(data) {
     const list = lsGet(SK.TEXTBOOKS, []);
     list.push(data);
@@ -267,7 +274,7 @@
         /^定义[:：]/.test(p) ||
         /就是|是指|叫做|称为|指的是/.test(p) ||
         (p.length < 80 && /[称为做义]$/u.test(p));
-      const isExample = /^例[\s\d]|^例题|解[:：]/.test(p);
+      const isExample = /^例[\s\d]|^例题|^解[:：]/.test(p);
       if (isDef) defs.push(p);
       else if (isExample) examples.push(p);
       else main.push(p);
@@ -630,6 +637,21 @@
   }
 
   // ---------- PDF 文本清洗 ----------
+  // 段落恢复：以句末标点结尾的行视为段落结束，段落间用空行分隔
+  function mergeIntoParagraphs(lines) {
+    const paragraphs = [];
+    let cur = "";
+    for (const line of lines.filter(Boolean)) {
+      cur = cur ? cur + line : line;
+      if (/[。！？.!?…]$/.test(line)) {
+        paragraphs.push(cur);
+        cur = "";
+      }
+    }
+    if (cur) paragraphs.push(cur);
+    return paragraphs.join("\n\n");
+  }
+
   // 清洗单页 PDF 文本：按坐标分行、断行修正、段落恢复
   function cleanPdfPageText(textItems) {
     if (!textItems || !textItems.length) return "";
@@ -674,8 +696,8 @@
       }
     }
 
-    // 3. 段落恢复：连续的行合并为段落，空行作为段落分隔
-    return merged.filter(Boolean).join("\n");
+    // 3. 段落恢复：以句末标点结尾的行视为段落结束，段落间用空行分隔
+    return mergeIntoParagraphs(merged);
   }
 
   // 跨页页眉页脚检测：统计每页首尾行，找出在 >=50% 页面重复出现的行
@@ -748,7 +770,7 @@
         merged.push(line);
       }
     }
-    return merged.join("\n");
+    return mergeIntoParagraphs(merged);
   }
 
   // 对扫描版 PDF 逐页渲染 canvas 并 OCR，返回 { pageNum: cleanedText }
@@ -1257,13 +1279,21 @@
         `该课时原文仅 ${content.length} 字，过少。可能页码映射有误，建议到「教材原文管理」检查。`
       );
     }
-    // 关键词匹配：从课时名提取 2 字以上中文片段，检查是否在原文出现
-    const stopWords = ["的认识", "的应用", "练习", "复习", "的认识"];
-    const keywords = (lessonTitle.match(/[\u4e00-\u9fa5]{2,}/g) || [])
+    // 关键词匹配：先按 的/与/和/及/、 切分课时名，再取 2-4 字中文片段，去停用词后检查是否在原文出现
+    const stopWords = ["认识", "应用", "练习", "复习", "初步", "初步认识", "教学", "学习"];
+    const rawKeywords = lessonTitle
+      .split(/[的与和及、，,]/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const keywords = rawKeywords
+      .flatMap((s) => s.match(/[\u4e00-\u9fa5]{2,4}/g) || [])
       .filter((k) => k.length >= 2 && !stopWords.includes(k));
-    const missing = keywords.filter((k) => !content.includes(k));
-    if (keywords.length && missing.length === keywords.length) {
-      warnings.push(`课时名关键词（${keywords.join("、")}）均未在原文中出现，可能页码映射错误。`);
+    const uniqueKeywords = [...new Set(keywords)];
+    const missing = uniqueKeywords.filter((k) => !content.includes(k));
+    if (uniqueKeywords.length && missing.length === uniqueKeywords.length) {
+      warnings.push(
+        `课时名关键词（${uniqueKeywords.join("、")}）均未在原文中出现，可能页码映射错误。`
+      );
     }
     return { ok: warnings.length === 0, warnings };
   }
@@ -1620,7 +1650,7 @@
       version: 3,
       exported_at: new Date().toISOString(),
       config: getConfig(),
-      textbooks: getCustomTextbooks(),
+      textbooks: getCustomTextbooks().concat(getOverrideEntries()),
       textbook_content: textbookContent,
       lessons: getLessons(),
     };
@@ -1653,9 +1683,17 @@
         if (Array.isArray(data.textbooks)) {
           const cur = lsGet(SK.TEXTBOOKS, []);
           data.textbooks.forEach((tb) => {
-            if (tb && tb.id && !cur.find((t) => t.id === tb.id)) {
+            if (!tb || !tb.id) return;
+            // _override 项与普通自定义教材按 id+类型去重
+            const existing = cur.find(
+              (t) => t.id === tb.id && !!t._override === !!tb._override
+            );
+            if (!existing) {
               cur.push(tb);
               merged++;
+            } else if (tb._override && tb.has_content) {
+              // 更新已有 override 的 has_content 标记
+              existing.has_content = true;
             }
           });
           lsSet(SK.TEXTBOOKS, cur);
