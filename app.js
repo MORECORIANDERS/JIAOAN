@@ -798,6 +798,172 @@
     return cache;
   }
 
+  // ---------- PDF 元信息自动识别 ----------
+
+  // 从 PDF 书签提取章节结构（优先方案）
+  async function extractChaptersFromOutline(pdf) {
+    let outline;
+    try {
+      outline = await pdf.getOutline();
+    } catch (e) {
+      return null;
+    }
+    if (!outline || !outline.length) return null;
+    // 书签通常两层：第一层=章节，第二层=课时。也有一层（直接是课时）的情况。
+    const chapters = [];
+    outline.forEach((node, idx) => {
+      const title = String(node.title || "").trim();
+      if (!title) return;
+      const lessons = (node.items || [])
+        .map((it) => String(it.title || "").trim())
+        .filter(Boolean);
+      if (lessons.length) {
+        // 两层结构：章节 + 课时
+        chapters.push({ id: `ch${idx + 1}`, title, lessons });
+      } else {
+        // 单层结构：把该项作为课时，归入一个默认章节
+        if (!chapters.length) chapters.push({ id: "ch1", title: "目录", lessons: [] });
+        chapters[chapters.length - 1].lessons.push(title);
+      }
+    });
+    return chapters.length ? chapters : null;
+  }
+
+  // 从目录页文本提取章节结构（回退方案）
+  function extractChaptersFromToc(pagesCache) {
+    // 找"目录"页：前 5 页中含"目录"且行数 >=3 的页
+    const pageKeys = Object.keys(pagesCache)
+      .map((k) => parseInt(k, 10))
+      .filter((n) => !isNaN(n))
+      .sort((a, b) => a - b);
+    let tocText = "";
+    for (const i of pageKeys.slice(0, 5)) {
+      const t = pagesCache[i] || "";
+      if (/目\s*录/.test(t) && t.split("\n").length >= 3) {
+        tocText = t;
+        break;
+      }
+    }
+    if (!tocText) return null;
+    const lines = tocText.split("\n").map((l) => l.trim()).filter(Boolean);
+    const chapters = [];
+    let curChapter = null;
+    // 章节行模式：第X章/第X单元/Unit N/第X节；课时行通常较短或带页码
+    const chapterRe = /^第[一二三四五六七八九十\d]+[章单元节部分]|^Unit\s+\d+|^Lesson\s+\d+/i;
+    // 页码后缀（如 "3" 或 "……3" 或 "...... 15"）
+    const pageNumSuffix = /[\.…\s]*\d{1,3}\s*$/;
+    for (const line of lines) {
+      if (chapterRe.test(line)) {
+        const title = line.replace(pageNumSuffix, "").trim();
+        curChapter = { id: `ch${chapters.length + 1}`, title, lessons: [] };
+        chapters.push(curChapter);
+      } else if (curChapter && line.length >= 2 && line.length <= 30) {
+        // 作为课时（去掉尾部页码）
+        const lesson = line.replace(pageNumSuffix, "").trim();
+        if (lesson) curChapter.lessons.push(lesson);
+      }
+    }
+    // 过滤掉没有课时的章节
+    const valid = chapters.filter((c) => c.lessons.length > 0);
+    return valid.length ? valid : null;
+  }
+
+  // 从文本猜测学科
+  function guessSubject(text) {
+    const rules = [
+      [/数学|代数|几何|有理数|方程|函数|乘除|加减|分数|小数/, "数学"],
+      [/语文|课文|生字|古诗|文言文|阅读|写作|拼音|汉字/, "语文"],
+      [/英语|English|Unit|Lesson|word|sentence|grammar/i, "英语"],
+      [/物理|力学|电学|光学|声现象|机械运动|能量/, "物理"],
+      [/化学|分子|原子|元素|化合物|溶液|酸碱|化学反应/, "化学"],
+      [/生物|细胞|植物|动物|遗传|生态系统|人体/, "生物"],
+      [/历史|朝代|古代|近代|革命|战争|文明|帝国/, "历史"],
+      [/地理|地图|气候|地形|大洲|国家|经纬|人口/, "地理"],
+      [/政治|道德|法治|宪法|公民|社会|价值观/, "政治"],
+      [/科学|观察|实验|物质|生命|地球与宇宙/, "科学"],
+    ];
+    for (const [re, subj] of rules) {
+      if (re.test(text)) return subj;
+    }
+    return "";
+  }
+
+  // 从文本猜测年级
+  function guessGrade(text) {
+    // 小学
+    const m1 = text.match(/([一二三四五六])年级/);
+    if (m1) return `${m1[1]}年级`;
+    // 初中
+    const m2 = text.match(/([七八九])年级/);
+    if (m2) return `${m2[1]}年级`;
+    // 高中
+    const m3 = text.match(/(高一|高二|高三)/);
+    if (m3) return m3[1];
+    return "";
+  }
+
+  // 从文本猜测版本
+  function guessVersion(text) {
+    const rules = [
+      [/人教版|人民教育出版社/, "人教版"],
+      [/北师大版|北京师范大学出版社/, "北师大版"],
+      [/苏教版|江苏教育出版社/, "苏教版"],
+      [/沪教版|上海教育出版社/, "沪教版"],
+      [/华东师大版|华东师范大学出版社/, "华东师大版"],
+      [/青岛版/, "青岛版"],
+      [/西师版|西南师范大学出版社/, "西师版"],
+      [/鲁教版/, "鲁教版"],
+      [/湘教版/, "湘教版"],
+    ];
+    for (const [re, v] of rules) {
+      if (re.test(text)) return v;
+    }
+    return "人教版"; // 默认值
+  }
+
+  // 把章节结构转为文本框格式（每行：章节名 | 课时1,课时2,…）
+  function chaptersToText(chapters) {
+    return chapters
+      .map((ch) => `${ch.title} | ${ch.lessons.join(",")}`)
+      .join("\n");
+  }
+
+  // 主入口：从 PDF 识别元信息，填充新建模式表单
+  async function autoFillFromPdf(pdf, pagesCache) {
+    // 教材名称：优先元数据 Title
+    let title = "";
+    try {
+      const meta = await pdf.getMetadata();
+      title = String(meta?.info?.Title || "").trim();
+      // 元数据 Title 常为乱码或文件名，简单过滤：含中文才用
+      if (title && !/[\u4e00-\u9fa5]/.test(title)) title = "";
+    } catch (e) {}
+    // 章节：优先书签，回退目录页
+    let chapters = await extractChaptersFromOutline(pdf);
+    if (!chapters) chapters = extractChaptersFromToc(pagesCache);
+    // 拼接用于猜测的文本：标题 + 前 5 页 + 章节文本
+    const pageKeys = Object.keys(pagesCache)
+      .map((k) => parseInt(k, 10))
+      .filter((n) => !isNaN(n))
+      .sort((a, b) => a - b);
+    const samplePages = pageKeys
+      .slice(0, 5)
+      .map((k) => pagesCache[k])
+      .join("\n");
+    const guessText = `${title}\n${samplePages}\n${chapters ? chaptersToText(chapters) : ""}`;
+    const subject = guessSubject(guessText);
+    const grade = guessGrade(guessText);
+    const version = guessVersion(guessText);
+    // 填入表单（仅新建模式；关联模式不动）
+    if (importState.mode !== "new") return { filled: false };
+    if (title) $("#ipTitle").value = title;
+    if (subject) $("#ipSubject").value = subject;
+    if (grade) $("#ipGrade").value = grade;
+    $("#ipVersion").value = version; // 总有默认值
+    if (chapters) $("#ipChapters").value = chaptersToText(chapters);
+    return { filled: true, hasChapters: !!chapters, hasTitle: !!title };
+  }
+
   // 解析 PDF 文本
   async function handlePdfUpload(file) {
     if (!file) return;
@@ -845,6 +1011,17 @@
             } else {
               $("#ipPdfStatus").textContent =
                 `✓ OCR 识别完成，共 ${pdf.numPages} 页，约 ${totalChars} 字。`;
+              // 新建模式下自动填充元信息
+              if (importState.mode === "new") {
+                try {
+                  const r = await autoFillFromPdf(pdf, cache);
+                  if (r.filled) {
+                    $("#ipPdfStatus").textContent += " 已自动识别章节与元信息，请核对后继续。";
+                  }
+                } catch (e) {
+                  console.error("[autofill]", e);
+                }
+              }
             }
           } catch (e) {
             $("#ipPdfStatus").textContent = "❌ OCR 识别失败：" + (e?.message || e);
@@ -860,6 +1037,22 @@
       } else {
         $("#ipPdfStatus").textContent =
           `✓ 已解析 ${pdf.numPages} 页，共约 ${totalChars} 字（已清洗段落、过滤页眉页脚）。`;
+        // 新建模式下自动填充元信息
+        if (importState.mode === "new") {
+          try {
+            const r = await autoFillFromPdf(pdf, cache);
+            if (r.filled) {
+              const parts = [];
+              if (r.hasChapters) parts.push("章节结构");
+              if (r.hasTitle) parts.push("教材名称");
+              parts.push("学科/年级/版本");
+              $("#ipPdfStatus").textContent += ` 已自动识别${parts.join("、")}，请核对后继续。`;
+            }
+          } catch (e) {
+            console.error("[autofill]", e);
+            // 自动填充失败不影响主流程，静默跳过
+          }
+        }
       }
     } catch (e) {
       $("#ipPdfStatus").textContent = "❌ 解析失败：" + (e?.message || e);
